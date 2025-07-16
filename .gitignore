@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# 가상환경
+venv/
+ENV/
+.env
+.venv/
+
+# macOS
+.DS_Store
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+
+# 기타
+*.log 
