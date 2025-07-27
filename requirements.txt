@@ -7,3 +7,4 @@ starlette
 requests
 Pillow
 boto3
+aiohttp
