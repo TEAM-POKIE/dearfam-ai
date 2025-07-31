@@ -1,17 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from typing import List
-import os
 import logging
-import json
-import re
-import asyncio
 from dotenv import load_dotenv
-
-from google import genai
-from openai import AsyncOpenAI
-
+from .ai_services import DiaryAIService, VideoAIService
+from .s3_util import upload_image_to_s3
 # 환경 변수 로드
 load_dotenv()
 
@@ -21,106 +14,87 @@ logging.basicConfig(level=logging.INFO)
 # FastAPI 앱 생성
 app = FastAPI()
 
-# Gemini 클라이언트
-gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-# OpenAI 비동기 클라이언트
-openai_client = AsyncOpenAI(api_key=os.getenv("CHAT_GPT_API_KEY"))
-
+# 일기 생성 API 요청 모델
 class DiaryRequest(BaseModel):
-    user_text: List[str] = Field(..., description="스프링부트에서 전달받는 문장 리스트")
-
-
-async def generate_single_diary(text: str, text_index: int):
-    try:
-        # Gemini 일기 생성
-        gemini_response = gemini_client.models.generate_content(
-            model="gemini-2.5-pro",
-            contents=f"""
-            {text} 
-            내용을 바탕으로 초등학생 그림일기를 작성해줘.
-
-            예시처럼 **JSON만** 응답해줘. (맨 앞에 json, 설명, 코드블록, 마크다운, 줄바꿈 등 아무것도 붙이지 마!)
-            {{
-                "title": "제목 (15자 이내)",
-                "content": "일기 내용 (100자 이내)"
-            }}
-            """
-        )
-
-        diary_text = gemini_response.text.strip()
-        try:
-            cleaned = re.sub(r"^```json|```$", "", diary_text).strip()
-            diary_dict = json.loads(cleaned)
-        except Exception as parse_error:
-            raise ValueError(f"Gemini JSON 파싱 실패: {parse_error}")
-
-        # DALL·E-3 이미지 비동기 생성
-        image_response = await openai_client.images.generate(
-            model="dall-e-3",
-            prompt=f"""
-            {text}의 내용에 맞는 2D 만화 그림체로 그림을 그려줘. 
-            둥글둥글하고 따뜻한 색감, 동화적인 스타일로 표현해줘.
-            전체 사진의 크기는 16:9기지만, 나타내는 사진의 비율은 4:3으로 꽉 채워주고, 
-            나머지는 비슷한 색으로 여백을 채워줘.
-            """,
-            size="1792x1024",
-            n=1
-        )
-
-        image_url = image_response.data[0].url
-
-        return {
-            "text_index": text_index,
-            "title": diary_dict.get("title", ""),
-            "content": diary_dict.get("content", ""),
-            "image_url": image_url
-        }
-
-    except Exception as e:
-        logging.error(f"[{text_index}] 처리 실패: {str(e)}")
-        return {
-            "text_index": text_index,
-            "title": "처리 실패",
-            "content": "처리 실패",
-            "image_url": "처리 실패"
-        }
+    user_text: str = Field(..., description="일기 생성용 텍스트")
 
 
 @app.post("/generate-diary")
 async def generate_diary(req: DiaryRequest):
-    user_texts = req.user_text
-    logging.info(f"총 {len(user_texts)}개의 텍스트 요청 수신")
+    """일기 생성 API"""
+    user_text = req.user_text
+    logging.info(f"일기 생성 요청: {user_text[:50]}...")
 
-    results = []
+    result = await DiaryAIService.generate_diary(user_text)
     
-    # 3개씩 나누어서 처리
-    batch_size = 3
-    for batch_start in range(0, len(user_texts), batch_size):
-        batch_end = min(batch_start + batch_size, len(user_texts))
-        batch_texts = user_texts[batch_start:batch_end]
-        
-        logging.info(f"배치 {batch_start//batch_size + 1} 처리 시작: {batch_start}~{batch_end-1}")
-        
-        # 현재 배치를 병렬 처리
-        batch_tasks = []
-        for i, text in enumerate(batch_texts):
-            text_index = batch_start + i
-            task = generate_single_diary(text, text_index)
-            batch_tasks.append(task)
-        
-        batch_results = await asyncio.gather(*batch_tasks)
-        results.extend(batch_results)
-        
-        logging.info(f"배치 {batch_start//batch_size + 1} 완료")
-        
-        # 마지막 배치가 아니면 rate limit을 위한 대기
-        if batch_end < len(user_texts):
-            logging.info("다음 배치를 위해 12초 대기...")
-            await asyncio.sleep(12)
+    logging.info(f"일기 생성 완료")
+    return JSONResponse(result)
 
-    logging.info(f"총 {len(results)}개 처리 완료")
 
-    return JSONResponse({
-        "results": results
-    })
+@app.post("/animate-image")
+async def animate_image(
+    image: UploadFile = File(..., description="영상화할 이미지 파일"),
+    prompt: str = Form(..., description="영상화 프롬프트")
+):
+    """사진 영상화 API"""
+    try:
+        # 이미지 파일 읽기
+        image_data = await image.read()
+        logging.info(f"영상화 요청: {image.filename}, 프롬프트: {prompt[:50]}...")
+
+        # 파일 크기 검증 (예: 10MB 제한)
+        if len(image_data) > 10 * 1024 * 1024:  # 10MB
+            return JSONResponse({
+                "status": "error",
+                "message": "파일 크기가 너무 큽니다. 10MB 이하로 업로드해주세요."
+            }, status_code=400)
+
+        # 파일 형식 검증
+        allowed_types = ["image/jpeg", "image/png", "image/jpg"]
+        if image.content_type not in allowed_types:
+            return JSONResponse({
+                "status": "error", 
+                "message": "지원하지 않는 파일 형식입니다. JPEG, PNG 파일만 업로드 가능합니다."
+            }, status_code=400)
+
+        # 이미지 방향 수정 (EXIF 정보 제거)
+        from PIL import Image
+        import io
+        
+        # PIL로 이미지 열기
+        image = Image.open(io.BytesIO(image_data))
+        
+        # EXIF 정보 제거하고 올바른 방향으로 회전
+        if hasattr(image, '_getexif') and image._getexif() is not None:
+            exif = image._getexif()
+            orientation = exif.get(274)  # EXIF orientation tag
+            if orientation:
+                # 방향에 따라 회전
+                if orientation == 3:
+                    image = image.rotate(180, expand=True)
+                elif orientation == 6:
+                    image = image.rotate(270, expand=True)
+                elif orientation == 8:
+                    image = image.rotate(90, expand=True)
+        
+        # 이미지를 PNG로 변환 (EXIF 정보 제거)
+        output_buffer = io.BytesIO()
+        image.save(output_buffer, format='PNG')
+        corrected_image_data = output_buffer.getvalue()
+        
+        # 수정된 이미지를 S3에 임시 업로드
+        image_url = upload_image_to_s3(corrected_image_data, "temp", "png")
+        logging.info(f"이미지 방향 수정 후 임시 업로드 완료: {image_url}")
+
+        # 영상화 처리 (비디오를 S3에 저장)
+        result = await VideoAIService.animate_image(image_url, prompt)
+        
+        logging.info(f"영상화 완료: {result.get('status', 'unknown')}")
+        return JSONResponse(result)
+
+    except Exception as e:
+        logging.error(f"영상화 처리 중 오류: {str(e)}")
+        return JSONResponse({
+            "status": "error",
+            "message": f"영상화 처리 중 오류가 발생했습니다: {str(e)}"
+        }, status_code=500)

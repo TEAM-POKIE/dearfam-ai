@@ -20,9 +20,9 @@ s3 = boto3.client(
     region_name=AWS_S3_REGION
 )
 
-def upload_image_to_s3(image_bytes: bytes, directory: str, id: int, ext: str = "png") -> str:
+def upload_image_to_s3(image_bytes: bytes, directory: str, ext: str = "png") -> str:
     # 예: posts/1/uuid.png
-    filename = f"{directory}/{id}/{uuid.uuid4().hex}.{ext}"
+    filename = f"{directory}/images/{uuid.uuid4().hex}.{ext}"
     try:
         s3.put_object(
             Bucket=AWS_S3_BUCKET,
@@ -35,3 +35,30 @@ def upload_image_to_s3(image_bytes: bytes, directory: str, id: int, ext: str = "
     
     url = f"https://{AWS_S3_BUCKET}.s3.{AWS_S3_REGION}.amazonaws.com/{filename}"
     return url
+
+
+def upload_video_to_s3(video_bytes: bytes, is_temp: bool = True) -> str:
+    """
+    비디오를 S3에 업로드
+    Args:
+        video_bytes: 비디오 파일 바이트
+        is_temp: True면 임시 저장, False면 영구 저장
+    Returns:
+        S3 URL
+    """
+    directory = "temp/videos" if is_temp else "videos"
+    filename = f"{directory}/{uuid.uuid4().hex}.mp4"
+    
+    try:
+        s3.put_object(
+            Bucket=AWS_S3_BUCKET,
+            Key=filename,
+            Body=video_bytes,
+            ContentType="video/mp4"
+        )
+    except Exception as e:
+        raise RuntimeError(f"S3 비디오 업로드 실패: {e}")
+    
+    url = f"https://{AWS_S3_BUCKET}.s3.{AWS_S3_REGION}.amazonaws.com/{filename}"
+    return url
+
