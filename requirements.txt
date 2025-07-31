@@ -8,3 +8,4 @@ requests
 Pillow
 boto3
 aiohttp
+python-multipart
