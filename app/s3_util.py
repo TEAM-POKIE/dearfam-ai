@@ -1,5 +1,6 @@
 import os
 import boto3
+import logging
 from dotenv import load_dotenv
 import uuid
 
@@ -38,27 +39,30 @@ def upload_image_to_s3(image_bytes: bytes, directory: str, ext: str = "png") -> 
 
 
 def upload_video_to_s3(video_bytes: bytes, is_temp: bool = True) -> str:
-    """
-    비디오를 S3에 업로드
-    Args:
-        video_bytes: 비디오 파일 바이트
-        is_temp: True면 임시 저장, False면 영구 저장
-    Returns:
-        S3 URL
-    """
     directory = "temp/videos" if is_temp else "videos"
-    filename = f"{directory}/{uuid.uuid4().hex}.mp4"
-    
+    key = f"{directory}/{uuid.uuid4().hex}.mp4"
+
     try:
         s3.put_object(
             Bucket=AWS_S3_BUCKET,
-            Key=filename,
+            Key=key,
             Body=video_bytes,
             ContentType="video/mp4"
         )
     except Exception as e:
         raise RuntimeError(f"S3 비디오 업로드 실패: {e}")
     
-    url = f"https://{AWS_S3_BUCKET}.s3.{AWS_S3_REGION}.amazonaws.com/{filename}"
+    url = f"https://{AWS_S3_BUCKET}.s3.{AWS_S3_REGION}.amazonaws.com/{key}"
     return url
+
+
+def delete_file_from_s3(file_url: str) -> bool:
+    try:
+        key = file_url.replace(f"https://{AWS_S3_BUCKET}.s3.{AWS_S3_REGION}.amazonaws.com/", "")
+        
+        s3.delete_object(Bucket=AWS_S3_BUCKET, Key=key)
+        return True
+    except Exception as e:
+        logging.error(f"S3 파일 삭제 실패: {e}")
+        return False
 

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 import logging
 from dotenv import load_dotenv
 from .ai_services import DiaryAIService, VideoAIService
-from .s3_util import upload_image_to_s3
+from .s3_util import upload_image_to_s3, delete_file_from_s3
 # 환경 변수 로드
 load_dotenv()
 
@@ -88,6 +88,14 @@ async def animate_image(
 
         # 영상화 처리 (비디오를 S3에 저장)
         result = await VideoAIService.animate_image(image_url, prompt)
+        
+        # 영상화 완료 후 임시 이미지 삭제
+        if result.get('status') == 'success':
+            delete_success = delete_file_from_s3(image_url)
+            if delete_success:
+                logging.info(f"임시 이미지 삭제 완료: {image_url}")
+            else:
+                logging.warning(f"임시 이미지 삭제 실패: {image_url}")
         
         logging.info(f"영상화 완료: {result.get('status', 'unknown')}")
         return JSONResponse(result)
