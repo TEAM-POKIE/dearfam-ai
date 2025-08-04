@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 openai
-google-genai
 python-dotenv
 starlette
 requests
@@ -9,3 +8,4 @@ Pillow
 boto3
 aiohttp
 python-multipart
+pydantic
