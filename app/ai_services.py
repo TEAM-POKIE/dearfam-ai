@@ -75,7 +75,8 @@ class DiaryAIService:
                 {text}의 내용과 같은 한 귀여운 따뜻한 그림일기 일러스트.
                 초등학생이 쓴 일기에서 나온 장면처럼, 단순하고 밝은 만화 스타일. 
                 가족들과의 일상 경험을 표현,
-                (모든 언어) 텍스트는 포함하지 마세요. 종교 관련 이미지도 제외해주세요.
+                내용에 들어가지 않는 가상의 인물들은 추가하지 마세요,
+                그림의 언어는 모두 한국어로 표현해주세요. 종교 관련 이미지도 제외해주세요.
                 """,
                 size="1024x1024",
                 n=1
@@ -188,7 +189,7 @@ class VideoAIService:
             "Content-Type": "application/json"
         }
         
-        max_attempts = 6  # 최대 1분 대기 (10초 * 6)
+        max_attempts = 7  # 최대 1분 10초 대기 (10초 * 7)
         
         for attempt in range(max_attempts):
             logging.info(f"ModelsLab 결과 확인 시도 {attempt + 1}/{max_attempts}")
