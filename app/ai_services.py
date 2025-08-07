@@ -72,11 +72,12 @@ class DiaryAIService:
             image_response = await openai_client.images.generate(
                 model="dall-e-3",
                 prompt=f"""
-                One cute warm picture diary illustration such as the content of {text}.
-                Simple and bright cartoon style, like a scene from a diary written by an elementary school student.
-                Express your daily experiences with your family,
-                Don't add fictional characters that don't go into the content,
-                Please express all the languages in the picture in Korean. Please exclude religious images, too.
+                {text}의 내용과 같은 한 귀여운 따뜻한 그림일기 일러스트.
+                초등학생이 쓴 일기에서 나온 장면처럼, 단순하고 밝은 만화 스타일. 
+                가족들과의 일상 경험을 표현,
+                내용에 들어가지 않는 가상의 인물들은 추가하지 마세요,
+                최대한 언어를 넣지 마세요. 언어가 추가된다면 그림의 언어는 모두 한국어로 표현해주세요. 
+                종교 관련 이미지도 제외해주세요.
                 """,
                 size="1024x1024",
                 n=1
