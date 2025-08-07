@@ -76,7 +76,7 @@ class DiaryAIService:
                 초등학생이 쓴 일기에서 나온 장면처럼, 단순하고 밝은 만화 스타일. 
                 가족들과의 일상 경험을 표현,
                 내용에 들어가지 않는 가상의 인물들은 추가하지 마세요,
-                최대한 언어를 넣지 마세요. 언어가 추가된다면 그림의 언어는 모두 한국어로 표현해주세요. 
+                최대한 그림에 언어를 넣지 마세요.
                 종교 관련 이미지도 제외해주세요.
                 """,
                 size="1024x1024",
@@ -105,30 +105,43 @@ class VideoAIService:
     @staticmethod
     async def animate_image(image_url: str, prompt: str):
         """사진을 영상화"""
-        try:
-            logging.info(f"영상화 시작: 이미지 URL: {image_url}, 프롬프트: {prompt[:100]}")
-            
-            # ModelsLab API로 영상화 요청 (URL만 받기)
-            video_url = await VideoAIService._call_modelslab_api(image_url, prompt)
-            
-            # ModelsLab에서 받은 비디오를 S3에 다운로드하여 저장
-            s3_video_url = await VideoAIService._download_and_upload_to_s3(video_url)
-            
-            logging.info(f"영상화 완료: S3 URL - {s3_video_url}")
-            
-            return {
-                "video_url": s3_video_url,
-                "status": "success", 
-                "message": "영상화가 완료되었습니다."
-            }
-            
-        except Exception as e:
-            logging.error(f"영상화 실패: {str(e)}")
-            return {
-                "video_url": "",
-                "status": "error",
-                "message": f"영상화 처리 중 오류가 발생했습니다: {str(e)}"
-            }
+        max_retries = 3
+        retry_delay = 2  # 초
+        
+        for attempt in range(max_retries):
+            try:
+                logging.info(f"영상화 시작 (시도 {attempt + 1}/{max_retries}): 이미지 URL: {image_url}, 프롬프트: {prompt[:100]}")
+                
+                # ModelsLab API로 영상화 요청 (URL만 받기)
+                video_url = await VideoAIService._call_modelslab_api(image_url, prompt)
+                
+                # ModelsLab에서 받은 비디오를 S3에 다운로드하여 저장
+                s3_video_url = await VideoAIService._download_and_upload_to_s3(video_url)
+                
+                logging.info(f"영상화 완료: S3 URL - {s3_video_url}")
+                
+                return {
+                    "video_url": s3_video_url,
+                    "status": "success", 
+                    "message": "영상화가 완료되었습니다."
+                }
+                
+            except Exception as e:
+                error_msg = str(e)
+                logging.error(f"영상화 실패 (시도 {attempt + 1}/{max_retries}): {error_msg}")
+                
+                # 마지막 시도가 아니고, 재시도 가능한 에러인 경우
+                if attempt < max_retries - 1 and "Failed to generate image" in error_msg:
+                    logging.info(f"{retry_delay}초 후 재시도합니다...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # 지수 백오프
+                    continue
+                else:
+                    return {
+                        "video_url": "",
+                        "status": "error",
+                        "message": f"영상화 처리 중 오류가 발생했습니다: {error_msg}"
+                    }
     
     @staticmethod
     async def _call_modelslab_api(image_url: str, prompt: str) -> str:
@@ -163,7 +176,12 @@ class VideoAIService:
                 logging.info(f"ModelsLab API 응답: {result}")
                 
                 # 2. 응답 처리
-                if result.get("status") == "processing":
+                if result.get("status") == "error":
+                    error_message = result.get("message", "알 수 없는 오류")
+                    logging.error(f"ModelsLab API 에러: {error_message}")
+                    raise Exception(f"ModelsLab API 에러: {error_message}")
+                
+                elif result.get("status") == "processing":
                     # 처리 중인 경우 polling으로 결과 대기
                     task_id = result.get("id")
                     if not task_id:
@@ -205,7 +223,12 @@ class VideoAIService:
                 result = await response.json()
                 logging.info(f"Polling 응답: {result}")
                 
-                if result.get("output") and len(result.get("output", [])) > 0:
+                if result.get("status") == "error":
+                    error_message = result.get("message", "알 수 없는 오류")
+                    logging.error(f"ModelsLab API polling 에러: {error_message}")
+                    raise Exception(f"ModelsLab API 처리 실패: {error_message}")
+                
+                elif result.get("output") and len(result.get("output", [])) > 0:
                     video_url = result.get("output")[0]
                     logging.info(f"ModelsLab 비디오 URL 받음: {video_url}")
                     return video_url
