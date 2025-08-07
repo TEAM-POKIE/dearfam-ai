@@ -41,6 +41,16 @@ async def animate_image(
         # 이미지 파일 읽기
         image_data = await image.read()
         logging.info(f"영상화 요청: {image.filename}, 프롬프트: {prompt[:50]}...")
+        logging.info(f"요청 content_type: {image.content_type}")
+        logging.info(f"요청 파일 크기: {len(image_data)} bytes")
+        logging.info(f"요청 프롬프트: {prompt}")
+
+        # 🚫 최소 파일 크기 30KB 제한
+        if len(image_data) < 30 * 1024:  # 30KB
+            return JSONResponse({
+                "status": "error",
+                "message": "이미지 용량이 너무 작습니다. 최소 30KB 이상 이미지를 업로드해주세요."
+            }, status_code=400)
 
         # 파일 크기 검증 (예: 10MB 제한)
         if len(image_data) > 10 * 1024 * 1024:  # 10MB
