@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from .s3_util import upload_video_to_s3
+from .s3_util import upload_video_to_s3, download_and_upload_image_to_s3
 
 # 환경 변수 로드
 load_dotenv()
@@ -53,7 +53,7 @@ class DiaryAIService:
                     예시처럼 **JSON만** 응답해줘. (맨 앞에 json, 설명, 코드블록, 마크다운, 줄바꿈 등 아무것도 붙이지 마!)
                     {{
                         "title": "제목 (15자 이내)",
-                        "content": "일기 내용 (100자 이내)"
+                        "content": "일기 내용 (최소 100자 이상, 최대 150자 이내)"
                     }}
                     """
                 }],
@@ -82,12 +82,15 @@ class DiaryAIService:
                 size="1024x1024",
                 n=1
             )
-            image_url = image_response.data[0].url
+            openai_image_url = image_response.data[0].url
+            
+            # OpenAI에서 받은 이미지를 S3에 임시 저장
+            s3_image_url = await download_and_upload_image_to_s3(openai_image_url, is_temp=True)
 
             return {
                 "title": diary_dict.get("title", ""),
                 "content": diary_dict.get("content", ""),
-                "image_url": image_url
+                "image_url": s3_image_url
             }
 
         except Exception as e:
@@ -105,6 +108,18 @@ class VideoAIService:
     @staticmethod
     async def animate_image(image_url: str, prompt: str):
         """사진을 영상화"""
+        # API 키 상태 확인
+        if not modelslab_api_key:
+            logging.error("MODELSLAB_API_KEY가 설정되지 않았습니다.")
+            return {
+                "video_url": "",
+                "status": "error",
+                "message": "ModelsLab API 키가 설정되지 않았습니다."
+            }
+        
+        logging.info(f"ModelsLab API 키 상태: {'설정됨' if modelslab_api_key else '설정되지 않음'}")
+        logging.info(f"ModelsLab API 키 길이: {len(modelslab_api_key) if modelslab_api_key else 0}자")
+        
         max_retries = 3
         retry_delay = 2  # 초
         
@@ -164,13 +179,18 @@ class VideoAIService:
         }
         
         logging.info(f"ModelsLab API 호출 시작: {image_url}")
+        logging.info(f"ModelsLab API 요청 데이터: {{'key': '***', 'model_id': '{data['model_id']}', 'init_image': '{data['init_image']}', 'prompt': '{data['prompt']}'}}")
         
         async with aiohttp.ClientSession() as session:
             # 1. 영상화 요청
             async with session.post(url, headers=headers, json=data) as response:
+                logging.info(f"ModelsLab API 응답 상태: {response.status}")
+                logging.info(f"ModelsLab API 응답 헤더: {dict(response.headers)}")
+                
                 if response.status != 200:
                     error_text = await response.text()
-                    raise Exception(f"ModelsLab API 오류 ({response.status}): {error_text}")
+                    logging.error(f"ModelsLab API HTTP 오류: {response.status} - {error_text}")
+                    raise Exception(f"ModelsLab API HTTP 오류 ({response.status}): {error_text}")
                 
                 result = await response.json()
                 logging.info(f"ModelsLab API 응답: {result}")
@@ -178,7 +198,15 @@ class VideoAIService:
                 # 2. 응답 처리
                 if result.get("status") == "error":
                     error_message = result.get("message", "알 수 없는 오류")
-                    logging.error(f"ModelsLab API 에러: {error_message}")
+                    error_code = result.get("code", "unknown")
+                    logging.error(f"ModelsLab API 에러: {error_message} (코드: {error_code})")
+                    
+                    # 특정 에러에 대한 상세 정보
+                    if "Failed to generate image" in error_message:
+                        logging.error("이미지 생성 실패 - 가능한 원인: 이미지 형식, 크기, 내용 등")
+                        logging.error(f"이미지 URL: {image_url}")
+                        logging.error(f"프롬프트: {prompt}")
+                    
                     raise Exception(f"ModelsLab API 에러: {error_message}")
                 
                 elif result.get("status") == "processing":
@@ -187,6 +215,7 @@ class VideoAIService:
                     if not task_id:
                         raise Exception("ModelsLab API에서 task_id를 받지 못했습니다.")
                     
+                    logging.info(f"ModelsLab API 처리 중 - task_id: {task_id}")
                     # polling으로 결과 대기
                     return await VideoAIService._poll_modelslab_result(session, modelslab_api_key, task_id)
                     
@@ -196,6 +225,7 @@ class VideoAIService:
                     logging.info(f"ModelsLab 비디오 URL 받음: {video_url}")
                     return video_url
                 else:
+                    logging.error(f"ModelsLab API 응답에 output이 없음: {result}")
                     raise Exception("ModelsLab API에서 비디오 URL을 받지 못했습니다.")
     
     @staticmethod
