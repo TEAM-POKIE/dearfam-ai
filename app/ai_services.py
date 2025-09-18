@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from .s3_util import upload_video_to_s3, download_and_upload_image_to_s3
+from .s3_util import upload_video_to_s3, download_and_upload_image_to_s3, upload_image_to_s3
 
 # 환경 변수 로드
 load_dotenv()
@@ -291,5 +291,189 @@ class VideoAIService:
         except Exception as e:
             logging.error(f"비디오 다운로드/업로드 실패: {str(e)}")
             raise Exception(f"비디오 처리 실패: {str(e)}")
+
+
+class CharacterAIService:
+    """캐릭터화 AI 서비스"""
     
+    @staticmethod
+    async def characterize_image(image_url: str, prompt: str = "Ghibli Studio style, Charming hand-drawn anime-style illustration"):
+        """이미지를 캐릭터화"""
+        # API 키 상태 확인
+        if not modelslab_api_key:
+            logging.error("MODELSLAB_API_KEY가 설정되지 않았습니다.")
+            return {
+                "character_image_url": "",
+                "status": "error",
+                "message": "ModelsLab API 키가 설정되지 않았습니다."
+            } 
+        
+        logging.info(f"캐릭터화 시작: 이미지 URL: {image_url}, 프롬프트: {prompt[:100]}")
+        
+        max_retries = 3
+        retry_delay = 2  # 초
+        
+        for attempt in range(max_retries):
+            try:
+                logging.info(f"캐릭터화 시작 (시도 {attempt + 1}/{max_retries})")
+                
+                # ModelsLab API로 캐릭터화 요청
+                character_image_url = await CharacterAIService._call_modelslab_characterize_api(image_url, prompt)
+                
+                # ModelsLab에서 받은 이미지를 S3에 다운로드하여 저장
+                s3_character_image_url = await CharacterAIService._download_and_upload_character_to_s3(character_image_url)
+                
+                logging.info(f"캐릭터화 완료: S3 URL - {s3_character_image_url}")
+                
+                return {
+                    "character_image_url": s3_character_image_url,
+                    "status": "success", 
+                    "message": "캐릭터화가 완료되었습니다."
+                }
+                
+            except Exception as e:
+                error_msg = str(e)
+                logging.error(f"캐릭터화 실패 (시도 {attempt + 1}/{max_retries}): {error_msg}")
+                
+                # 마지막 시도가 아니고, 재시도 가능한 에러인 경우
+                if attempt < max_retries - 1 and "Failed to generate image" in error_msg:
+                    logging.info(f"{retry_delay}초 후 재시도합니다...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # 지수 백오프
+                    continue
+                else:
+                    return {
+                        "character_image_url": "",
+                        "status": "error",
+                        "message": f"캐릭터화 처리 중 오류가 발생했습니다: {error_msg}"
+                    }
+    
+    @staticmethod
+    async def _call_modelslab_characterize_api(image_url: str, prompt: str) -> str:
+        """ModelsLab ControlNet API를 호출하여 캐릭터화 수행"""
+        if not modelslab_api_key:
+            raise ValueError("MODELSLAB_API_KEY 환경 변수가 설정되지 않았습니다.")
+        
+        url = "https://modelslab.com/api/v5/controlnet"
+        
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model_id": "fluxdev",
+            "init_image": image_url,
+            "prompt": prompt,
+            "steps": "20",
+            "controlnet_type": "ghibli",
+            "controlnet_model": "ghibli",
+            "key": modelslab_api_key
+        }
+        
+        logging.info(f"ModelsLab ControlNet API 호출 시작: {image_url}")
+        logging.info(f"ModelsLab ControlNet API 요청 데이터: {{'model_id': '{data['model_id']}', 'init_image': '{data['init_image']}', 'prompt': '{data['prompt']}', 'steps': '{data['steps']}', 'controlnet_type': '{data['controlnet_type']}', 'controlnet_model': '{data['controlnet_model']}', 'key': '***'}}")
+        
+        async with aiohttp.ClientSession() as session:
+            # 캐릭터화 요청
+            async with session.post(url, headers=headers, json=data) as response:
+                logging.info(f"ModelsLab ControlNet API 응답 상태: {response.status}")
+                logging.info(f"ModelsLab ControlNet API 응답 헤더: {dict(response.headers)}")
+                
+                if response.status != 200:
+                    error_text = await response.text()
+                    logging.error(f"ModelsLab ControlNet API HTTP 오류: {response.status} - {error_text}")
+                    raise Exception(f"ModelsLab ControlNet API HTTP 오류 ({response.status}): {error_text}")
+                
+                result = await response.json()
+                logging.info(f"ModelsLab ControlNet API 응답: {result}")
+                
+                # 응답 처리
+                if result.get("status") == "error":
+                    error_message = result.get("message", "알 수 없는 오류")
+                    error_code = result.get("code", "unknown")
+                    logging.error(f"ModelsLab ControlNet API 에러: {error_message} (코드: {error_code})")
+                    raise Exception(f"ModelsLab ControlNet API 에러: {error_message}")
+                
+                elif result.get("status") == "processing":
+                    # 처리 중인 경우 polling으로 결과 대기
+                    task_id = result.get("id")
+                    if not task_id:
+                        raise Exception("ModelsLab ControlNet API에서 task_id를 받지 못했습니다.")
+                    
+                    logging.info(f"ModelsLab ControlNet API 처리 중 - task_id: {task_id}")
+                    # polling으로 결과 대기
+                    return await CharacterAIService._poll_modelslab_characterize_result(session, modelslab_api_key, task_id)
+                    
+                elif result.get("output") and len(result.get("output", [])) > 0:
+                    # 바로 결과가 온 경우
+                    character_image_url = result.get("output")[0]
+                    logging.info(f"ModelsLab 캐릭터 이미지 URL 받음: {character_image_url}")
+                    return character_image_url
+                else:
+                    logging.error(f"ModelsLab ControlNet API 응답에 output이 없음: {result}")
+                    raise Exception("ModelsLab ControlNet API에서 캐릭터 이미지 URL을 받지 못했습니다.")
+    
+    @staticmethod
+    async def _poll_modelslab_characterize_result(session: aiohttp.ClientSession, api_key: str, task_id: int) -> str:
+        """ModelsLab ControlNet API 처리 결과를 polling으로 확인"""
+        fetch_url = f"https://modelslab.com/api/v5/controlnet/fetch/{task_id}"
+        
+        headers = {
+            "key": api_key,
+            "Content-Type": "application/json"
+        }
+        
+        max_attempts = 7  # 최대 1분 10초 대기 (10초 * 7)
+        
+        for attempt in range(max_attempts):
+            logging.info(f"ModelsLab ControlNet 결과 확인 시도 {attempt + 1}/{max_attempts}")
+            
+            await asyncio.sleep(10)  # 10초 대기
+            
+            async with session.post(fetch_url, headers=headers) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise Exception(f"ModelsLab ControlNet fetch API 오류 ({response.status}): {error_text}")
+                
+                result = await response.json()
+                logging.info(f"ControlNet Polling 응답: {result}")
+                
+                if result.get("status") == "error":
+                    error_message = result.get("message", "알 수 없는 오류")
+                    logging.error(f"ModelsLab ControlNet API polling 에러: {error_message}")
+                    raise Exception(f"ModelsLab ControlNet API 처리 실패: {error_message}")
+                
+                elif result.get("output") and len(result.get("output", [])) > 0:
+                    character_image_url = result.get("output")[0]
+                    logging.info(f"ModelsLab 캐릭터 이미지 URL 받음: {character_image_url}")
+                    return character_image_url
+                
+                elif result.get("status") != "processing":
+                    raise Exception(f"ModelsLab ControlNet API 처리 실패: {result.get('message', '알 수 없는 오류')}")
+        
+        raise Exception("ModelsLab ControlNet API 처리 시간 초과 (1분)")
+    
+    @staticmethod
+    async def _download_and_upload_character_to_s3(character_image_url: str) -> str:
+        """ModelsLab에서 받은 캐릭터 이미지를 다운로드하여 S3에 업로드"""
+        try:
+            logging.info(f"캐릭터 이미지 다운로드 시작: {character_image_url}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(character_image_url) as response:
+                    if response.status != 200:
+                        raise Exception(f"캐릭터 이미지 다운로드 실패 ({response.status})")
+                    
+                    character_image_data = await response.read()
+                    logging.info(f"캐릭터 이미지 다운로드 완료: {len(character_image_data)} bytes")
+                    
+                    # s3_util.py의 upload_image_to_s3 사용 (character 디렉토리)
+                    s3_url = upload_image_to_s3(character_image_data, "character", "png")
+                    
+                    logging.info(f"캐릭터 이미지 S3 업로드 완료: {s3_url}")
+                    return s3_url
+                    
+        except Exception as e:
+            logging.error(f"캐릭터 이미지 다운로드/업로드 실패: {str(e)}")
+            raise Exception(f"캐릭터 이미지 처리 실패: {str(e)}")
 

@@ -26,7 +26,7 @@ s3 = boto3.client(
 
 def upload_image_to_s3(image_bytes: bytes, directory: str, ext: str = "png") -> str:
     # 예: posts/1/uuid.png
-    filename = f"{directory}/images/{uuid.uuid4().hex}.{ext}"
+    filename = f"temp/{directory}/{uuid.uuid4().hex}.{ext}"
     
     # Content-Type 매핑
     content_type_map = {
